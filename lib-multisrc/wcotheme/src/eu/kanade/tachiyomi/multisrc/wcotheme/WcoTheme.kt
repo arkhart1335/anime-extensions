@@ -14,11 +14,16 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.utils.addEditTextPreference
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.bodyString
+import keiyoushi.utils.get
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.post
+import keiyoushi.utils.toHex
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -34,6 +39,8 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import uy.kohesive.injekt.injectLazy
+import kotlin.random.Random
+import kotlin.time.Duration.Companion.milliseconds
 
 abstract class WcoTheme :
     ParsedAnimeHttpSource(),
@@ -181,7 +188,7 @@ abstract class WcoTheme :
     }
 
     // ============================== Episodes ==============================
-    override fun episodeListSelector() = "div.cat-eps, div#episodeList a.dark-episode-item"
+    override fun episodeListSelector() = "div.cat-eps, div#episodeList a.dark-episode-item, nav#sidebarEpisodeList a.sidebar-episode-item"
 
     override fun episodeListParse(response: Response): List<SEpisode> {
         val document = response.asJsoup()
@@ -295,9 +302,7 @@ abstract class WcoTheme :
         return runBlocking { runCatching { iframeParse(iframeUrl, episodeReferer) }.getOrElse { emptyList() } }
     }
 
-    private fun generateNonce(): String = buildString {
-        repeat(16) { append("%02x".format(kotlin.random.Random.nextInt(0, 256))) }
-    }
+    private fun generateNonce(): String = ByteArray(16).also(Random::nextBytes).toHex()
 
     private fun chromeHeadersBuilder() = Headers.Builder()
         .add("User-Agent", DESKTOP_USER_AGENT)
@@ -319,7 +324,10 @@ abstract class WcoTheme :
             .add("Sec-Fetch-Site", "cross-site")
             .build()
 
-        client.newCall(GET(iframeLink, navHeaders)).awaitSuccess().body?.close()
+        client.get(
+            iframeLink,
+            navHeaders,
+        ).close()
 
         // 1b. Load pre-init.js — the server tracks this sub-resource request
         val preInitUrl = "$iframeDomain/inc/embed/pre-init.js?v2"
@@ -334,44 +342,36 @@ abstract class WcoTheme :
         }
 
         // 2a. Small delay to simulate pre-init.js execution time
-        kotlinx.coroutines.delay(300)
+        delay(300.milliseconds)
 
         // 2b. Create the "clear" beacon
         val pid = iframeLink.toHttpUrl().queryParameter("pid") ?: return emptyList()
         val nonce = generateNonce()
         val beaconBody = """{"nonce":"$nonce","status":"clear","id":"$pid"}"""
-        val beaconRequest = okhttp3.Request.Builder()
-            .url("$iframeDomain/ad-verify")
-            .post(beaconBody.toRequestBody("application/json".toMediaType()))
-            .apply {
-                chromeHeadersBuilder().build().toMultimap().forEach { (name, values) ->
-                    values.forEach { addHeader(name, it) }
-                }
-                addHeader("Accept", "*/*")
-                addHeader("Content-Type", "application/json")
-                addHeader("Origin", iframeDomain)
-                addHeader("Referer", iframeLink)
-                addHeader("Sec-Fetch-Dest", "empty")
-                addHeader("Sec-Fetch-Mode", "cors")
-                addHeader("Sec-Fetch-Site", "same-origin")
-            }
+
+        val beaconHeaders = chromeHeadersBuilder()
+            .add("Accept", "*/*")
+            .add("Origin", iframeDomain)
+            .add("Referer", iframeLink)
+            .add("Sec-Fetch-Dest", "empty")
+            .add("Sec-Fetch-Mode", "cors")
+            .add("Sec-Fetch-Site", "same-origin")
             .build()
-        client.newCall(beaconRequest).awaitSuccess().body?.close()
+
+        client.post(
+            "$iframeDomain/ad-verify",
+            beaconHeaders,
+            beaconBody.toRequestBody("application/json".toMediaType()),
+        ).close()
 
         // 3. WAIT — server enforces anti-bot delay after beacon
         val delaySeconds = preferences.getString(PREF_DELAY_KEY, PREF_DELAY_DEFAULT)
             ?.toIntOrNull()
             ?.takeIf { it in 1..60 }
             ?: PREF_DELAY_DEFAULT.toInt()
-        kotlinx.coroutines.delay(delaySeconds * 1000L)
+        delay((delaySeconds * 1000L).milliseconds)
 
-        // 4. Fetch the real player page (video-js.php) with the verified nonce
-        val videoJsUrl = iframeLink.toHttpUrl().newBuilder()
-            .encodedPath("/inc/embed/video-js.php")
-            .addQueryParameter("n", nonce)
-            .build()
-            .toString()
-
+        // 4. Fetch the real player page — try video-js-old.php first, then fall back to video-js.php
         val embedHeaders = chromeHeadersBuilder()
             .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
             .add("Priority", "u=0, i")
@@ -384,9 +384,34 @@ abstract class WcoTheme :
             .add("Upgrade-Insecure-Requests", "1")
             .build()
 
-        val iframeSoup = client.newCall(GET(videoJsUrl, embedHeaders))
+        val videoJsOldUrl = iframeLink.toHttpUrl().newBuilder()
+            .encodedPath("/inc/embed/video-js-old.php")
+            .addQueryParameter("n", nonce)
+            .build()
+            .toString()
+
+        val iframeResponse = client.newCall(GET(videoJsOldUrl, embedHeaders))
             .awaitSuccess()
-            .asJsoup()
+
+        val iframeBody = iframeResponse.body.string()
+
+        val videoJsUrl = if ("$.getJSON" in iframeBody) {
+            videoJsOldUrl
+        } else {
+            iframeLink.toHttpUrl().newBuilder()
+                .encodedPath("/inc/embed/video-js.php")
+                .addQueryParameter("n", nonce)
+                .build()
+                .toString()
+        }
+
+        val iframeSoup = if ("$.getJSON" in iframeBody) {
+            Jsoup.parse(iframeBody, iframeDomain)
+        } else {
+            client.newCall(GET(videoJsUrl, embedHeaders))
+                .awaitSuccess()
+                .asJsoup()
+        }
 
         val getVideoLinkScript =
             iframeSoup.selectFirst("script:containsData(getJSON)")?.data()
@@ -459,36 +484,18 @@ abstract class WcoTheme :
             summary = "%s",
         )
 
-        val delayPref = androidx.preference.EditTextPreference(screen.context).apply {
-            key = PREF_DELAY_KEY
-            title = PREF_DELAY_TITLE
-            setDefaultValue(PREF_DELAY_DEFAULT)
-            setDialogTitle(PREF_DELAY_TITLE)
+        val currentDelay = preferences.getString(PREF_DELAY_KEY, PREF_DELAY_DEFAULT) ?: PREF_DELAY_DEFAULT
 
-            // Normalize stored value: default if missing, non-numeric, or negative
-            val storedValue = preferences.getString(PREF_DELAY_KEY, PREF_DELAY_DEFAULT)
-            val normalizedValue = storedValue?.toIntOrNull()?.takeIf { it in 1..60 }
-                ?: PREF_DELAY_DEFAULT.toInt()
-
-            // Write the normalized value back if the stored one was invalid
-            if (normalizedValue.toString() != storedValue) {
-                preferences.edit().putString(PREF_DELAY_KEY, normalizedValue.toString()).apply()
-            }
-
-            summary = "Current: ${normalizedValue}s"
-
-            // Validate: only positive numbers up to 60
-            setOnPreferenceChangeListener { _, newValue ->
-                val value = (newValue as? String)?.toIntOrNull()
-                if (value != null && value > 0 && value <= 60) {
-                    summary = "Current: ${value}s"
-                    true
-                } else {
-                    false
-                }
-            }
-        }
-        screen.addPreference(delayPref)
+        screen.addEditTextPreference(
+            key = PREF_DELAY_KEY,
+            title = PREF_DELAY_TITLE,
+            default = PREF_DELAY_DEFAULT,
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER,
+            validate = { it.toIntOrNull() in 1..60 },
+            validationMessage = { "Enter a number between 1 and 60" },
+            summary = "Current:  ${currentDelay}s",
+            getSummary = { "Current: ${it}s" },
+        )
     }
     override val supportsRelatedAnimes = false
 
