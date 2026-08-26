@@ -195,13 +195,20 @@ abstract class WcoTheme :
         val episodes = document.select(episodeListSelector()).mapNotNull {
             runCatching { episodeFromElement(it) }.getOrNull()
         }
-        return episodes.mapIndexed { index, episode ->
+
+        // Subbed first, then dubbed; within each group sort by episode number
+        val sorted = episodes.sortedWith(
+            compareBy(
+                { it.name.contains("dub", ignoreCase = true) },
+                { it.episode_number },
+            ),
+        )
+
+        return sorted.mapIndexed { index, episode ->
             episode.apply {
-                episode_number = (episodes.size - index).toFloat()
+                episode_number = (sorted.size - index).toFloat()
             }
         }
-            // If opening an episode link instead of anime link, there is no episode list available.
-            // So we return the same episode with the title from the page.
             .ifEmpty {
                 listOf(
                     SEpisode.create().apply {
@@ -220,8 +227,9 @@ abstract class WcoTheme :
         val anchor = if (element.tagName() == "a") element else element.selectFirst("a")!!
         setUrlWithoutDomain(anchor.attr("href"))
         val title = anchor.selectFirst("span")?.text() ?: element.text()
-        val (name, _) = episodeTitleFromElement(title)
+        val (name, epNum) = episodeTitleFromElement(title)
         this.name = name
+        this.episode_number = epNum
     }
 
     open fun episodeTitleFromElement(title: String): Pair<String, Float> {
