@@ -398,12 +398,11 @@ abstract class WcoTheme :
             .build()
             .toString()
 
-        val iframeResponse = client.newCall(GET(videoJsOldUrl, embedHeaders))
-            .awaitSuccess()
+        val oldPlayerResponse = client.newCall(GET(videoJsOldUrl, embedHeaders)).execute()
+        val oldPlayerBody = oldPlayerResponse.body.string()
+        val useOldPlayer = oldPlayerResponse.isSuccessful && "$.getJSON" in oldPlayerBody
 
-        val iframeBody = iframeResponse.body.string()
-
-        val videoJsUrl = if ("$.getJSON" in iframeBody) {
+        val videoJsUrl = if (useOldPlayer) {
             videoJsOldUrl
         } else {
             iframeLink.toHttpUrl().newBuilder()
@@ -413,8 +412,8 @@ abstract class WcoTheme :
                 .toString()
         }
 
-        val iframeSoup = if ("$.getJSON" in iframeBody) {
-            Jsoup.parse(iframeBody, iframeDomain)
+        val iframeSoup = if (useOldPlayer) {
+            Jsoup.parse(oldPlayerBody, iframeDomain)
         } else {
             client.newCall(GET(videoJsUrl, embedHeaders))
                 .awaitSuccess()
@@ -492,7 +491,11 @@ abstract class WcoTheme :
             summary = "%s",
         )
 
-        val currentDelay = preferences.getString(PREF_DELAY_KEY, PREF_DELAY_DEFAULT) ?: PREF_DELAY_DEFAULT
+        val currentDelay = preferences.getString(PREF_DELAY_KEY, PREF_DELAY_DEFAULT)
+            ?.toIntOrNull()
+            ?.takeIf { it in 1..60 }
+            ?.toString()
+            ?: PREF_DELAY_DEFAULT
 
         screen.addEditTextPreference(
             key = PREF_DELAY_KEY,
