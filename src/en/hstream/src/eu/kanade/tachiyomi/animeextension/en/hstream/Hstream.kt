@@ -166,7 +166,7 @@ class Hstream :
 
         val uploadDate = runCatching {
             val dateText = doc.selectFirst("div.mt-4.flex.flex-wrap.items-center.gap-2.text-sm > div:has(i.fa-upload)")
-                ?.text()?.trim()
+                ?.text()
             DATE_FORMATTER.parse(dateText.orEmpty())?.time
         }.getOrNull() ?: 0L
 
