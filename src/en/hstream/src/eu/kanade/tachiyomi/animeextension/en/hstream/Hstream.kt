@@ -59,10 +59,10 @@ class Hstream :
 
         val imgElement = element.selectFirst("img")!!
         val rawTitle = imgElement.attr("alt")
-        title = rawTitle.replace(Regex("""\s*[-–—]?\s*(?:Episode\s*)?\d+(?:\.\d+)?\s*$""", RegexOption.IGNORE_CASE), "").trim()
+        title = EPISODE_PARSER.replace(rawTitle, "").trim()
 
-        val imageBasePath = imgElement.attr("src").substringBeforeLast("/")
-        thumbnail_url = "$baseUrl/$imageBasePath/cover-ep-$epNum.webp"
+        val imageBasePath = imgElement.absUrl("src").substringBeforeLast("/")
+        thumbnail_url = "$imageBasePath/cover-ep-$epNum.webp"
     }
 
     override fun popularAnimeParse(response: Response): AnimesPage {
@@ -280,6 +280,8 @@ class Hstream :
         private val DATE_FORMATTER by lazy {
             SimpleDateFormat("yyyy-MM-dd", Locale.ENGLISH)
         }
+
+        private val EPISODE_PARSER = Regex("""\s*(?:[-–—]\s*|\bEpisode\s*)\d+(?:\.\d+)?\s*$""", RegexOption.IGNORE_CASE)
         const val PREFIX_SEARCH = "id:"
 
         private const val PREF_QUALITY_KEY = "pref_quality_key"
