@@ -218,9 +218,23 @@ class Hstream :
         val subtitleList = listOf(Track("$urlBase/eng.ass", "English"))
 
         val resolutions = listOfNotNull("720", "1080", if (data.resolution == "4k") "2160" else null)
+
+        // Determine if we need to force legacy mode based on manifest inspection to handle html video chunks
+        var forceLegacy = data.legacy != 0
+        if (!forceLegacy) {
+            try {
+                val testUrl = urlBase + "/720/manifest.mpd"
+                val manifestString = client.newCall(GET(testUrl, headers)).execute().body?.string() ?: ""
+                if (manifestString.contains(".html")) {
+                    forceLegacy = true
+                }
+            } catch (_: Exception) {}
+        }
+
         return resolutions.map { resolution ->
-            val url = urlBase + getVideoUrlPath(data.legacy != 0, resolution)
-            Video(url, "${resolution}p", url, subtitleTracks = subtitleList)
+            val path = getVideoUrlPath(forceLegacy, resolution)
+            val url = urlBase + path
+            Video(url, "${resolution}p" + if (forceLegacy) " (Legacy)" else "", url, subtitleTracks = subtitleList)
         }
     }
 
