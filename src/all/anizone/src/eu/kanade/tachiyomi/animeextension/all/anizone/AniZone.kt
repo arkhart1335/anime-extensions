@@ -34,11 +34,11 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
@@ -164,9 +164,14 @@ class AniZone :
                         val fullUrl = animeObj["url"]?.jsonPrimitive?.content ?: ""
                         setUrlWithoutDomain(fullUrl.replace(DOMAIN_REGEX, ""))
 
-                        val titleListMap = animeObj["title_list"]?.jsonObject
-                            ?.mapValues { it.value.jsonPrimitive.content }
-                        title = resolveTitle(titleListMap, animeObj["main_title"]?.jsonPrimitive?.content)
+                        val titleListMap = (animeObj["title_list"] as? JsonObject)
+                            ?.mapNotNull { (key, value) ->
+                                (value as? JsonPrimitive)?.let { key to it.content }
+                            }?.toMap()
+                        title = resolveTitle(
+                            titleListMap,
+                            (animeObj["main_title"] as? JsonPrimitive)?.content,
+                        )
 
                         thumbnail_url = obj["snapshot"]?.jsonPrimitive?.content
                             ?: obj["teaser"]?.jsonPrimitive?.content
