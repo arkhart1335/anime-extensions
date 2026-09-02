@@ -430,9 +430,9 @@ class Mapple :
         val apiHeaders = buildApiHeaders()
         val streamHeaders = buildStreamHeaders()
 
-        val videos = serversToQuery.firstNotNullOfOrNull { hoster ->
-            fetchFromHoster(hoster, episodeData, requestToken, playbackToken, apiHeaders, streamHeaders)
-        } ?: emptyList()
+        val videos = serversToQuery.flatMap { hoster ->
+            fetchFromHoster(hoster, episodeData, requestToken, playbackToken, apiHeaders, streamHeaders) ?: emptyList()
+        }
 
         return videos
     }
