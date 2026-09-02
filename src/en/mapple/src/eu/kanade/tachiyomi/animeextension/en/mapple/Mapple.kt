@@ -44,6 +44,7 @@ import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration.Companion.milliseconds
 
 class Mapple :
@@ -433,8 +434,16 @@ class Mapple :
         val streamHeaders = buildStreamHeaders()
 
         serversToQuery.forEachIndexed { index, hoster ->
-            fetchFromHoster(hoster, episodeData, requestToken, playbackToken, apiHeaders, streamHeaders)
-                ?.let { return it }
+            val result = runCatching {
+                fetchFromHoster(hoster, episodeData, requestToken, playbackToken, apiHeaders, streamHeaders)
+            }.onFailure { exception ->
+                if (exception is CancellationException) throw exception
+                // Optional: log exception/hoster failure here
+            }.getOrNull()
+
+            if (result != null) {
+                return result
+            }
 
             if (index < serversToQuery.lastIndex) {
                 delay(1000.milliseconds)
