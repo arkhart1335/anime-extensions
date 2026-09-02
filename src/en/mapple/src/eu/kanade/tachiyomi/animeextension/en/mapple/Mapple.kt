@@ -27,6 +27,7 @@ import keiyoushi.utils.parallelMapNotNull
 import keiyoushi.utils.parseAs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -43,6 +44,7 @@ import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.time.Duration.Companion.milliseconds
 
 class Mapple :
     AnimeHttpLegacySource(),
@@ -430,11 +432,16 @@ class Mapple :
         val apiHeaders = buildApiHeaders()
         val streamHeaders = buildStreamHeaders()
 
-        val videos = serversToQuery.flatMap { hoster ->
-            fetchFromHoster(hoster, episodeData, requestToken, playbackToken, apiHeaders, streamHeaders) ?: emptyList()
+        serversToQuery.forEachIndexed { index, hoster ->
+            fetchFromHoster(hoster, episodeData, requestToken, playbackToken, apiHeaders, streamHeaders)
+                ?.let { return it }
+
+            if (index < serversToQuery.lastIndex) {
+                delay(1000.milliseconds)
+            }
         }
 
-        return videos
+        return emptyList()
     }
 
     private fun resolveServerPriority(): List<Hoster> {
@@ -481,7 +488,9 @@ class Mapple :
         }.getOrNull() ?: return null
 
         // 3b. Stream-encrypted
-        val streamUrl = (baseUrl + encryptResponse.url).toHttpUrl().newBuilder()
+        val streamUrl = (
+            baseUrl.toHttpUrl().resolve(encryptResponse.url) ?: return null
+            ).newBuilder()
             .addQueryParameter("requestToken", requestToken)
             .addQueryParameter("token", playbackToken)
             .build()
