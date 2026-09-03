@@ -196,7 +196,11 @@ class AniZone :
             ?: NEXT_CURSOR_REGEX.find(xData)?.groupValues?.get(1)
             ?: ""
 
-        val hasNextPage = (dispatchedHasMore ?: true) && nextCursor.isNotBlank()
+        val hasNextPage = if (nextCursor.isNotBlank()) {
+            dispatchedHasMore ?: true
+        } else {
+            html.selectFirst("div[x-intersect~=loadMore]") != null
+        }
 
         return AnimesPage(animeList, hasNextPage)
     }
@@ -954,7 +958,7 @@ class AniZone :
             val cleaned = stripFields
                 .fold(rawElement) { acc, field -> acc.stripXDataTextField(field) }
                 .unescapeXDataJson()
-                .sanitizeInvalidEscapes() // <-- add this
+                .sanitizeInvalidEscapes()
 
             try {
                 cleaned.parseAs<T>()
