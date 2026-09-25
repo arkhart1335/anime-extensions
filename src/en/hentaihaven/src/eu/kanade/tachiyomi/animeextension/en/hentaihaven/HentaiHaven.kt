@@ -186,7 +186,9 @@ class HentaiHaven :
             .distinctBy { it.url }
     }
 
-    private fun parseDateString(raw: String): Long = DATE_FORMATS.firstNotNullOfOrNull { it.tryParse(raw).takeIf { t -> t != 0L } } ?: 0L
+    private fun parseDateString(raw: String): Long = synchronized(DATE_FORMATS) {
+        DATE_FORMATS.firstNotNullOfOrNull { it.tryParse(raw).takeIf { t -> t != 0L } } ?: 0L
+    }
 
     // ============================ Videos =============================
 
@@ -196,9 +198,9 @@ class HentaiHaven :
 
         val playlistUrl = document
             .selectFirst("video source[type='application/vnd.apple.mpegurl']")
-            ?.attr("abs:src")
+            ?.attr("abs:src")?.takeIf { it.isNotBlank() }
             ?: document.selectFirst("source[data-hhaven-indexable-source]")
-                ?.attr("abs:src")
+                ?.attr("abs:src")?.takeIf { it.isNotBlank() }
             ?: extractContentUrlFromJsonLd(document)
             ?: return emptyList()
 
@@ -301,7 +303,7 @@ class HentaiHaven :
         private const val NEXT_PAGE_SELECTOR =
             "nav[aria-label='Archive pages'] a[rel=next]:not([aria-disabled=true])"
         private val EPISODE_NUMBER_REGEX = Regex("""^(\d+(?:\.\d+)?)(-.+)?$""")
-        private val EPISODE_SUFFIX_REGEX = Regex("""/episode-\d+/?$""")
+        private val EPISODE_SUFFIX_REGEX = Regex("""/episode-[^/]+/?$""")
         private const val DATA_SEPARATOR = "\n"
         private val DATE_FORMATS = listOf(
             SimpleDateFormat("MMMM d, yyyy", Locale.ENGLISH),
