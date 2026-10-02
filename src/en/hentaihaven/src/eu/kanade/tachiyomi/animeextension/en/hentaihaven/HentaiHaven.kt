@@ -30,6 +30,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 class HentaiHaven :
     Source(),
@@ -57,8 +58,7 @@ class HentaiHaven :
     @Volatile
     private var filterOptions: FilterOptionsDto? = null
 
-    @Volatile
-    private var filterFetchStarted = false
+    private val filterFetchStarted = AtomicBoolean(false)
 
     // ============================== Popular ===============================
 
@@ -236,15 +236,14 @@ class HentaiHaven :
     }
 
     private fun fetchFilters() {
-        if (filterFetchStarted) return
-        filterFetchStarted = true
+        if (!filterFetchStarted.compareAndSet(false, true)) return
         scope.launch {
             filterOptions = runCatching {
                 client.get("$baseUrl/search/").extractNextJs<FilterOptionsDto> {
                     it is JsonObject && "genres" in it && "authors" in it && "years" in it
                 }
             }.getOrNull()
-            if (filterOptions == null) filterFetchStarted = false
+            if (filterOptions == null) filterFetchStarted.set(false)
         }
     }
 
