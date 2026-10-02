@@ -32,39 +32,26 @@ class OctopusExtractor(private val client: OkHttpClient) {
         val videoHeaders = buildCdnHeaders(episodeUrl)
 
         // Never fatal — playback works from the master URL alone.
-        var subtitleTrack: Track? = masterUrl.resolve("s/en.vtt")?.let { Track(it.toString(), "English") }
-        val declaredHeights = mutableListOf<Int>()
-        try {
-            val masterBody = client.get(masterUrl, videoHeaders, ensureSuccess = false)
+        val masterBody = try {
+            client.get(masterUrl, videoHeaders, ensureSuccess = false)
                 .use { response -> if (response.isSuccessful) response.bodyString() else "" }
-            if (masterBody.isNotBlank()) {
-                val declaredSubtitle = masterBody.lineSequence()
-                    .firstOrNull { it.startsWith("#EXT-X-MEDIA:") && it.contains("TYPE=\"SUBTITLES\"") }
-                    ?.let { line ->
-                        line.substringAfter("URI=\"", "")
-                            .substringBefore('"')
-                            .takeIf { it.isNotBlank() }
-                            ?.let { UrlUtils.fixUrl(it, masterUrlString) }
-                    }
-                if (declaredSubtitle != null) subtitleTrack = Track(declaredSubtitle, "English")
-
-                masterBody.lineSequence()
-                    .mapNotNull { line ->
-                        RESOLUTION_REGEX.find(line)?.groupValues?.get(1)
-                            ?.substringAfterLast('x')
-                            ?.substringAfterLast('X')
-                            ?.toIntOrNull()
-                    }
-                    .distinct()
-                    .sortedDescending()
-                    .take(MAX_QUALITIES)
-                    .forEach { declaredHeights.add(it) }
-            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             // keep the defaults: playback works from the master URL alone
+            ""
         }
+
+        val declaredSubtitle = masterBody.lineSequence()
+            .firstOrNull { it.startsWith("#EXT-X-MEDIA:") && it.contains("TYPE=\"SUBTITLES\"") }
+            ?.let { line ->
+                line.substringAfter("URI=\"", "")
+                    .substringBefore('"')
+                    .takeIf { it.isNotBlank() }
+                    ?.let { UrlUtils.fixUrl(it, masterUrlString) }
+            }
+        val subtitleTrack: Track? = declaredSubtitle?.let { Track(it, "English") }
+            ?: masterUrl.resolve("s/en.vtt")?.let { Track(it.toString(), "English") }
 
         listOf(
             Video(
@@ -85,11 +72,5 @@ class OctopusExtractor(private val client: OkHttpClient) {
             .add("Cache-Control", "no-transform")
             .add("Accept", "application/x-mpegURL, application/vnd.apple.mpegurl, */*;q=0.8")
             .build()
-    }
-
-    companion object {
-        private const val MAX_QUALITIES = 6
-
-        private val RESOLUTION_REGEX = Regex("""RESOLUTION=([xX\d]+)""")
     }
 }
