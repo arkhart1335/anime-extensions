@@ -11,13 +11,12 @@ import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import keiyoushi.network.get
+import keiyoushi.utils.Source
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.delegate
 import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.firstInstanceOrNull
-import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
 import keiyoushi.utils.useAsJsoup
@@ -27,15 +26,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
 
 class HentaiHaven :
-    AnimeHttpSource(),
+    Source(),
     ConfigurableAnimeSource {
 
     override val name = "HentaiHaven"
@@ -54,7 +51,6 @@ class HentaiHaven :
 
     private val apiHeaders by lazy { headers.newBuilder().add("Referer", "$baseUrl/").build() }
     private val extractor by lazy { OctopusExtractor(client) }
-    private val preferences: SharedPreferences by getPreferencesLazy()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -217,7 +213,7 @@ class HentaiHaven :
         val episodeUrl = hoster.internalData.substringAfter(DATA_SEPARATOR)
 
         val preferred = preferences.qualityPref
-        return extractor.getVideosFromSourceUrl(playlistUrl, episodeUrl)
+        return extractor.extractOctopusStream(playlistUrl, episodeUrl)
             .sortedWith(
                 compareByDescending<Video> { it.videoTitle.contains(preferred) }
                     .thenByDescending { it.videoTitle.filter(Char::isDigit).toIntOrNull() ?: 0 },
@@ -279,20 +275,6 @@ class HentaiHaven :
         .firstNotNullOfOrNull { script ->
             runCatching { script.data().parseAs<JsonLdDto>() }.getOrNull()?.videoUrlOrNull()
         }
-
-    override fun animeDetailsParse(response: Response): SAnime = throw UnsupportedOperationException("Not used")
-    override fun animeDetailsRequest(anime: SAnime): Request = throw UnsupportedOperationException("Not used")
-    override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException("Not used")
-    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException("Not used")
-    override fun latestUpdatesParse(response: Response): AnimesPage = throw UnsupportedOperationException("Not used")
-    override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException("Not used")
-    override fun popularAnimeParse(response: Response): AnimesPage = throw UnsupportedOperationException("Not used")
-    override fun popularAnimeRequest(page: Int): Request = throw UnsupportedOperationException("Not used")
-    override fun relatedAnimeListRequest(anime: SAnime): Request = throw UnsupportedOperationException("Not used")
-    override fun searchAnimeParse(response: Response): AnimesPage = throw UnsupportedOperationException("Not used")
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request = throw UnsupportedOperationException("Not used")
-    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException("Not used")
-    override fun videoListParse(response: Response, hoster: Hoster): List<Video> = throw UnsupportedOperationException("Not used")
 
     companion object {
         private const val PREF_QUALITY_KEY = "preferred_quality"

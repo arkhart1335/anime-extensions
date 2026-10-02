@@ -18,14 +18,7 @@ import kotlin.coroutines.cancellation.CancellationException
  */
 class OctopusExtractor(private val client: OkHttpClient) {
 
-    suspend fun getVideosFromSourceUrl(
-        sourceUrl: String,
-        episodeUrl: String,
-    ): List<Video> = withContext(Dispatchers.IO) {
-        extractOctopusStream(sourceUrl, episodeUrl)
-    }
-
-    private suspend fun extractOctopusStream(sourceUrl: String, episodeUrl: String): List<Video> {
+    suspend fun extractOctopusStream(sourceUrl: String, episodeUrl: String): List<Video> = withContext(Dispatchers.IO) {
         val masterUrl = sourceUrl.toHttpUrl().let { url ->
             if (url.pathSegments.lastOrNull() == "playlist.m3u8") {
                 url.newBuilder()
@@ -73,27 +66,14 @@ class OctopusExtractor(private val client: OkHttpClient) {
             // keep the defaults: playback works from the master URL alone
         }
 
-        val entries: List<Video> = if (declaredHeights.isEmpty()) {
-            listOf(
-                Video(
-                    videoTitle = "Octopus · Auto",
-                    videoUrl = masterUrlString,
-                    headers = videoHeaders,
-                    subtitleTracks = listOfNotNull(subtitleTrack),
-                ),
-            )
-        } else {
-            declaredHeights.map { height ->
-                Video(
-                    videoTitle = "Octopus · ${height}p",
-                    videoUrl = masterUrlString,
-                    headers = videoHeaders,
-                    subtitleTracks = listOfNotNull(subtitleTrack),
-                )
-            }
-        }
-
-        return entries
+        listOf(
+            Video(
+                videoTitle = "Octopus · Auto",
+                videoUrl = masterUrlString,
+                headers = videoHeaders,
+                subtitleTracks = listOfNotNull(subtitleTrack),
+            ),
+        )
     }
 
     private fun buildCdnHeaders(episodeUrl: String): Headers {
@@ -101,17 +81,15 @@ class OctopusExtractor(private val client: OkHttpClient) {
         return Headers.Builder()
             .add("Referer", episodeUrl)
             .add("Origin", origin)
-            .add("Accept-Language", "en-US,en;q=0.9")
             .add("Accept-Encoding", "identity")
             .add("Cache-Control", "no-transform")
             .add("Accept", "application/x-mpegURL, application/vnd.apple.mpegurl, */*;q=0.8")
-            .add("Connection", "keep-alive")
             .build()
     }
 
     companion object {
         private const val MAX_QUALITIES = 6
 
-        private val RESOLUTION_REGEX by lazy { Regex("""RESOLUTION=([xX\d]+)""") }
+        private val RESOLUTION_REGEX = Regex("""RESOLUTION=([xX\d]+)""")
     }
 }
