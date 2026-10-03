@@ -3,22 +3,18 @@ package eu.kanade.tachiyomi.animeextension.en.hentaihaven.extractors
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import keiyoushi.network.get
-import keiyoushi.utils.UrlUtils
 import keiyoushi.utils.bodyString
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * Builds [Video] entries for the Octopus VP9/CMAF stream. Every entry points at the
- * untouched master playlist so audio and adaptive switching stay native to the player.
+ * Builds one [Video] per quality of the Octopus VP9/CMAF stream. Each variant is handed to the
+ * player as a DASH manifest by [OctopusDash] so that seeking works.
  */
 class OctopusExtractor(private val client: OkHttpClient) {
 
-    suspend fun extractOctopusStream(sourceUrl: String, episodeUrl: String): List<Video> = withContext(Dispatchers.IO) {
+    suspend fun extractOctopusStream(sourceUrl: String, episodeUrl: String): List<Video> {
         val masterUrl = sourceUrl.toHttpUrl().let { url ->
             if (url.pathSegments.lastOrNull() == "playlist.m3u8") {
                 url.newBuilder()
@@ -28,39 +24,23 @@ class OctopusExtractor(private val client: OkHttpClient) {
                 url
             }
         }
-        val masterUrlString = masterUrl.toString()
         val videoHeaders = buildCdnHeaders(episodeUrl)
+        val subtitles = listOfNotNull(masterUrl.resolve("s/en.vtt")?.let { Track(it.toString(), "English") })
 
-        // Never fatal — playback works from the master URL alone.
-        val masterBody = try {
-            client.get(masterUrl, videoHeaders, ensureSuccess = false)
-                .use { response -> if (response.isSuccessful) response.bodyString() else "" }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // keep the defaults: playback works from the master URL alone
-            ""
-        }
+        val lines = client.get(masterUrl, videoHeaders).bodyString().lines()
+        val audioUrl = lines.firstNotNullOfOrNull { AUDIO_REGEX.find(it)?.groupValues?.get(1) }
+            ?.let { masterUrl.resolve(it)?.toString() }
 
-        val declaredSubtitle = masterBody.lineSequence()
-            .firstOrNull { it.startsWith("#EXT-X-MEDIA:") && it.contains("TYPE=\"SUBTITLES\"") }
-            ?.let { line ->
-                line.substringAfter("URI=\"", "")
-                    .substringBefore('"')
-                    .takeIf { it.isNotBlank() }
-                    ?.let { UrlUtils.fixUrl(it, masterUrlString) }
-            }
-        val subtitleTrack: Track? = declaredSubtitle?.let { Track(it, "English") }
-            ?: masterUrl.resolve("s/en.vtt")?.let { Track(it.toString(), "English") }
-
-        listOf(
+        return lines.zipWithNext().mapNotNull { (info, uri) ->
+            if (!info.startsWith("#EXT-X-STREAM-INF:")) return@mapNotNull null
+            val videoUrl = masterUrl.resolve(uri)?.toString() ?: return@mapNotNull null
             Video(
-                videoTitle = "Octopus · Auto",
-                videoUrl = masterUrlString,
+                videoTitle = RESOLUTION_REGEX.find(info)?.groupValues?.get(1)?.let { "${it}p" } ?: "Auto",
+                videoUrl = OctopusDash.register(client, videoHeaders, videoUrl, audioUrl),
                 headers = videoHeaders,
-                subtitleTracks = listOfNotNull(subtitleTrack),
-            ),
-        )
+                subtitleTracks = subtitles,
+            )
+        }
     }
 
     private fun buildCdnHeaders(episodeUrl: String): Headers {
@@ -72,5 +52,10 @@ class OctopusExtractor(private val client: OkHttpClient) {
             .add("Cache-Control", "no-transform")
             .add("Accept", "application/x-mpegURL, application/vnd.apple.mpegurl, */*;q=0.8")
             .build()
+    }
+
+    companion object {
+        private val AUDIO_REGEX = Regex("""^#EXT-X-MEDIA:(?=.*TYPE=AUDIO).*URI="([^"]+)"""")
+        private val RESOLUTION_REGEX = Regex("""RESOLUTION=\d+x(\d+)""")
     }
 }
