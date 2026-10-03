@@ -11,7 +11,6 @@ import org.nanohttpd.protocols.http.response.Response.newFixedLengthResponse
 import org.nanohttpd.protocols.http.response.Status
 import java.io.ByteArrayInputStream
 import java.util.UUID
-import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.FutureTask
@@ -127,7 +126,7 @@ object OctopusDash : NanoHTTPD("127.0.0.1", 0) {
         val resource = if (index < 0) playlist.init else playlist.segments[index].resource
         var created: FutureTask<ByteArray>? = null
         val task = synchronized(cache) {
-            cache.getOrPut("$id/$track/$index") { FutureTask(Callable { stream.download(resource) }).also { created = it } }
+            cache.getOrPut("$id/$track/$index") { FutureTask { stream.download(resource) }.also { created = it } }
         }
         created?.let { prefetcher.execute(it) }
         return task
