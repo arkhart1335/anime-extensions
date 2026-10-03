@@ -5,6 +5,7 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import keiyoushi.network.get
 import keiyoushi.utils.bodyString
 import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 
@@ -28,20 +29,49 @@ class OctopusExtractor(private val client: OkHttpClient) {
         val subtitles = listOfNotNull(masterUrl.resolve("s/en.vtt")?.let { Track(it.toString(), "English") })
 
         val lines = client.get(masterUrl, videoHeaders).bodyString().lines()
-        val audioUrl = lines.firstNotNullOfOrNull { AUDIO_REGEX.find(it)?.groupValues?.get(1) }
-            ?.let { masterUrl.resolve(it)?.toString() }
 
-        return lines.zipWithNext().mapNotNull { (info, uri) ->
-            if (!info.startsWith("#EXT-X-STREAM-INF:")) return@mapNotNull null
-            val videoUrl = masterUrl.resolve(uri)?.toString() ?: return@mapNotNull null
-            Video(
-                videoTitle = RESOLUTION_REGEX.find(info)?.groupValues?.get(1)?.let { "${it}p" } ?: "Auto",
-                videoUrl = OctopusDash.register(client, videoHeaders, videoUrl, audioUrl),
-                headers = videoHeaders,
-                subtitleTracks = subtitles,
-            )
+        val audioGroups = lines
+            .map { it.trim() }
+            .filter { it.startsWith("#EXT-X-MEDIA:") }
+            .map { parseAttributes(it) }
+            .filter { it["TYPE"] == "AUDIO" && !it["URI"].isNullOrEmpty() }
+            .groupBy { it["GROUP-ID"] }
+
+        val videos = mutableListOf<Video>()
+        var streamInfo: Map<String, String>? = null
+        for (raw in lines) {
+            val line = raw.trim()
+            when {
+                line.isEmpty() -> Unit
+                line.startsWith("#EXT-X-STREAM-INF:") -> streamInfo = parseAttributes(line)
+                line.startsWith("#") -> Unit
+                else -> {
+                    val info = streamInfo ?: continue
+                    streamInfo = null
+                    val videoUrl = masterUrl.resolve(line)?.toString() ?: continue
+                    val audioUrl = selectAudio(masterUrl, audioGroups[info["AUDIO"]] ?: audioGroups.values.flatten())
+                    videos += Video(
+                        videoTitle = info["RESOLUTION"]?.substringAfter('x')?.toIntOrNull()?.let { "${it}p" } ?: "Auto",
+                        videoUrl = OctopusDash.register(client, videoHeaders, videoUrl, audioUrl),
+                        headers = videoHeaders,
+                        subtitleTracks = subtitles,
+                    )
+                }
+            }
         }
+        return videos
     }
+
+    private fun selectAudio(masterUrl: HttpUrl, group: List<Map<String, String>>?): String? {
+        val rendition = group?.firstOrNull { it["DEFAULT"] == "YES" }
+            ?: group?.firstOrNull { it["AUTOSELECT"] == "YES" }
+            ?: group?.firstOrNull()
+        return rendition?.get("URI")?.let { masterUrl.resolve(it)?.toString() }
+    }
+
+    private fun parseAttributes(line: String): Map<String, String> = ATTRIBUTE_REGEX
+        .findAll(line.substringAfter(':'))
+        .associate { it.groupValues[1] to it.groupValues[2].removeSurrounding("\"") }
 
     private fun buildCdnHeaders(episodeUrl: String): Headers {
         val origin = episodeUrl.toHttpUrl().let { "${it.scheme}://${it.host}" }
@@ -55,7 +85,6 @@ class OctopusExtractor(private val client: OkHttpClient) {
     }
 
     companion object {
-        private val AUDIO_REGEX = Regex("""^#EXT-X-MEDIA:(?=.*TYPE=AUDIO).*URI="([^"]+)"""")
-        private val RESOLUTION_REGEX = Regex("""RESOLUTION=\d+x(\d+)""")
+        private val ATTRIBUTE_REGEX = Regex("""([A-Z0-9-]+)=("[^"]*"|[^,]*)""")
     }
 }
