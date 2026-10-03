@@ -9,7 +9,12 @@ import org.nanohttpd.protocols.http.NanoHTTPD
 import org.nanohttpd.protocols.http.response.Response
 import org.nanohttpd.protocols.http.response.Response.newFixedLengthResponse
 import org.nanohttpd.protocols.http.response.Status
+import java.io.ByteArrayInputStream
 import java.util.UUID
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
 import kotlin.math.roundToLong
 
 /**
@@ -17,17 +22,27 @@ import kotlin.math.roundToLong
  *
  * Octopus segments are fMP4. The app's FFmpeg (7.1, used by both the player and the downloader)
  * keeps stale mov state after an HLS seek, so seeking past the cache never resumes. Its DASH
- * demuxer reopens the segment demuxer on every seek instead. Only the manifest is served
- * locally; segments are still fetched from the CDN.
+ * demuxer reopens the segment demuxer on every seek instead.
+ *
+ * That demuxer fetches one segment at a time, which leaves small low-quality segments dominated
+ * by request latency and the buffer barely filling. The segments are therefore proxied through
+ * the shared OkHttp client (reusing its connections) and the next few are read ahead.
  */
 object OctopusDash : NanoHTTPD("127.0.0.1", 0) {
 
-    private class Stream(val client: OkHttpClient, val headers: Headers, val videoUrl: String, val audioUrl: String?)
+    private const val VIDEO = "video"
+    private const val AUDIO = "audio"
+    private const val PREFETCH_AHEAD = 3
+    private const val PREFETCH_THREADS = 4
+    private const val MAX_CACHED_SEGMENTS = 10
 
-    /** Inclusive byte range, formatted as `first-last` like DASH `range` / `mediaRange`. */
-    private class ByteRange(val first: Long, val last: Long) {
-        override fun toString() = "$first-$last"
+    private class Stream(val client: OkHttpClient, val headers: Headers, val videoUrl: String, val audioUrl: String?) {
+        @Volatile
+        var playlists: Map<String, Playlist> = emptyMap()
     }
+
+    /** Inclusive byte range. */
+    private class ByteRange(val first: Long, val last: Long)
 
     private class Resource(val url: String, val range: ByteRange?)
 
@@ -42,32 +57,128 @@ object OctopusDash : NanoHTTPD("127.0.0.1", 0) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Stream>?) = size > 64
     }
 
+    // Segments shared by all streams, keyed by `streamId/track/index`; guarded by its own lock.
+    private val cache = object : LinkedHashMap<String, FutureTask<ByteArray>>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, FutureTask<ByteArray>>?) = size > MAX_CACHED_SEGMENTS
+    }
+
+    private val prefetcher = Executors.newFixedThreadPool(PREFETCH_THREADS) { Thread(it, "OctopusDash").apply { isDaemon = true } }
+
     @Synchronized
     fun register(client: OkHttpClient, headers: Headers, videoUrl: String, audioUrl: String?): String {
         if (!isAlive) start()
-        val path = "/${UUID.nameUUIDFromBytes("$videoUrl|$audioUrl".toByteArray())}.mpd"
-        streams[path] = Stream(client, headers, videoUrl, audioUrl)
-        return "http://127.0.0.1:$listeningPort$path"
+        val id = UUID.nameUUIDFromBytes("$videoUrl|$audioUrl".toByteArray()).toString()
+        // Keep an existing stream so a re-registration can't drop the playlists of a playing video.
+        streams.getOrPut(id) { Stream(client, headers, videoUrl, audioUrl) }
+        return "http://127.0.0.1:$listeningPort/$id.mpd"
     }
 
     override fun handle(session: IHTTPSession): Response {
-        val stream = synchronized(this) { streams[session.uri] }
-            ?: return newFixedLengthResponse(Status.NOT_FOUND, MIME_PLAINTEXT, "Not Found")
+        val parts = session.uri.trim('/').split('/')
+        val id = parts[0].removeSuffix(".mpd")
+        val stream = synchronized(this) { streams[id] } ?: return notFound()
         return try {
-            val video = stream.fetch(stream.videoUrl)
-            val audio = stream.audioUrl?.let { stream.fetch(it) }
-            val mpd = buildString {
-                append("""<?xml version="1.0" encoding="UTF-8"?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" """)
-                append("""profiles="urn:mpeg:dash:profile:full:2011" minBufferTime="PT2S" mediaPresentationDuration="PT${video.totalMs / 1000.0}S"><Period>""")
-                appendAdaptationSet("video", video)
-                audio?.let { appendAdaptationSet("audio", it) }
-                append("</Period></MPD>")
+            when {
+                parts.size == 1 && parts[0].endsWith(".mpd") -> manifest(stream, id, session.headers["range"])
+                parts.size == 3 -> segment(stream, id, parts[1], parts[2], session.headers["range"])
+                else -> notFound()
             }
-            newFixedLengthResponse(Status.OK, "application/dash+xml", mpd)
         } catch (e: Exception) {
             newFixedLengthResponse(Status.INTERNAL_ERROR, MIME_PLAINTEXT, e.toString())
         }
     }
+
+    private fun manifest(stream: Stream, id: String, rangeHeader: String?): Response {
+        val playlists = stream.loadPlaylists()
+        val video = playlists.getValue(VIDEO)
+        val baseUrl = "http://127.0.0.1:$listeningPort/$id"
+        val mpd = buildString {
+            append("""<?xml version="1.0" encoding="UTF-8"?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" """)
+            append("""profiles="urn:mpeg:dash:profile:full:2011" minBufferTime="PT2S" mediaPresentationDuration="PT${video.totalMs / 1000.0}S"><Period>""")
+            appendAdaptationSet(VIDEO, video, baseUrl)
+            playlists[AUDIO]?.let { appendAdaptationSet(AUDIO, it, baseUrl) }
+            append("</Period></MPD>")
+        }
+        // Served with range support so the player sees a seekable input and can start at a resume position.
+        return respond(mpd.toByteArray(), "application/dash+xml", rangeHeader)
+    }
+
+    private fun segment(stream: Stream, id: String, track: String, name: String, rangeHeader: String?): Response {
+        val playlist = (stream.playlists.ifEmpty { stream.loadPlaylists() })[track] ?: return notFound()
+        val index = if (name == "init") -1 else name.toIntOrNull() ?: return notFound()
+        if (index !in -1 until playlist.segments.size) return notFound()
+
+        val current = cached(stream, id, track, playlist, index)
+        for (next in index + 1..minOf(index + PREFETCH_AHEAD, playlist.segments.size - 1)) {
+            cached(stream, id, track, playlist, next)
+        }
+        // Runs the download here if no pool thread has picked it up yet, so a seek isn't queued behind old read-aheads.
+        current.run()
+        val data = try {
+            current.get()
+        } catch (e: ExecutionException) {
+            synchronized(cache) { if (cache["$id/$track/$index"] === current) cache.remove("$id/$track/$index") }
+            throw e.cause ?: e
+        }
+        return respond(data, "$track/mp4", rangeHeader)
+    }
+
+    private fun cached(stream: Stream, id: String, track: String, playlist: Playlist, index: Int): FutureTask<ByteArray> {
+        val resource = if (index < 0) playlist.init else playlist.segments[index].resource
+        var created: FutureTask<ByteArray>? = null
+        val task = synchronized(cache) {
+            cache.getOrPut("$id/$track/$index") { FutureTask(Callable { stream.download(resource) }).also { created = it } }
+        }
+        created?.let { prefetcher.execute(it) }
+        return task
+    }
+
+    private fun Stream.download(resource: Resource): ByteArray {
+        val range = resource.range
+        val requestHeaders = range?.let { headers.newBuilder().set("Range", "bytes=${it.first}-${it.last}").build() } ?: headers
+        return client.newCall(GET(resource.url.toHttpUrl(), requestHeaders)).execute().use { response ->
+            check(response.isSuccessful) { "HTTP ${response.code} for ${resource.url}" }
+            val bytes = response.body.bytes()
+            // A server that ignores the Range header answers 200 with the whole file.
+            if (range != null && response.code != 206) {
+                bytes.copyOfRange(range.first.toInt(), (range.last + 1).toInt().coerceAtMost(bytes.size))
+            } else {
+                bytes
+            }
+        }
+    }
+
+    private fun respond(data: ByteArray, mime: String, rangeHeader: String?): Response {
+        val range = rangeHeader?.trim()?.let { RANGE_REGEX.matchEntire(it) }
+        var start = 0
+        var end = data.size - 1
+        if (range != null) {
+            val (from, to) = range.destructured
+            if (from.isEmpty()) {
+                start = (data.size - (to.toIntOrNull() ?: 0)).coerceAtLeast(0)
+            } else {
+                start = from.toIntOrNull() ?: Int.MAX_VALUE
+                end = to.toIntOrNull()?.coerceAtMost(end) ?: end
+            }
+            if (start > end) {
+                return newFixedLengthResponse(Status.RANGE_NOT_SATISFIABLE, MIME_PLAINTEXT, "")
+                    .apply { addHeader("Content-Range", "bytes */${data.size}") }
+            }
+        }
+        val length = end - start + 1
+        val status = if (range == null) Status.OK else Status.PARTIAL_CONTENT
+        return newFixedLengthResponse(status, mime, ByteArrayInputStream(data, start, length), length.toLong()).apply {
+            addHeader("Accept-Ranges", "bytes")
+            if (range != null) addHeader("Content-Range", "bytes $start-$end/${data.size}")
+        }
+    }
+
+    private fun notFound() = newFixedLengthResponse(Status.NOT_FOUND, MIME_PLAINTEXT, "Not Found")
+
+    private fun Stream.loadPlaylists(): Map<String, Playlist> = buildMap {
+        put(VIDEO, fetch(videoUrl))
+        audioUrl?.let { put(AUDIO, fetch(it)) }
+    }.also { playlists = it }
 
     private fun Stream.fetch(url: String): Playlist {
         val playlistUrl = url.toHttpUrl()
@@ -131,7 +242,7 @@ object OctopusDash : NanoHTTPD("127.0.0.1", 0) {
     // FFmpeg maps a seek to segment `position / duration`, which is exact for fixed-length segments
     // (the shorter final one doesn't matter). Only when durations really vary is a SegmentTimeline
     // emitted so that each segment's start time stays accurate.
-    private fun StringBuilder.appendAdaptationSet(type: String, playlist: Playlist) {
+    private fun StringBuilder.appendAdaptationSet(type: String, playlist: Playlist, baseUrl: String) {
         val segments = playlist.segments
         val body = segments.dropLast(1).map { it.durationMs }
         val fixedLength = !USE_SEGMENT_TIMELINE || body.isEmpty() ||
@@ -144,13 +255,11 @@ object OctopusDash : NanoHTTPD("127.0.0.1", 0) {
         } else {
             append("""<SegmentList timescale="1000">""")
         }
-        append("""<Initialization sourceURL="${playlist.init.url.escape()}"${playlist.init.range.attr("range")}/>""")
+        append("""<Initialization sourceURL="$baseUrl/$type/init"/>""")
 
         if (!fixedLength) appendTimeline(segments)
 
-        segments.forEach {
-            append("""<SegmentURL media="${it.resource.url.escape()}"${it.resource.range.attr("mediaRange")}/>""")
-        }
+        segments.indices.forEach { append("""<SegmentURL media="$baseUrl/$type/$it"/>""") }
         append("</SegmentList></Representation></AdaptationSet>")
     }
 
@@ -171,15 +280,11 @@ object OctopusDash : NanoHTTPD("127.0.0.1", 0) {
         append("</SegmentTimeline>")
     }
 
-    private fun ByteRange?.attr(name: String) = this?.let { """ $name="$it"""" } ?: ""
-
-    // URLs are normalized by HttpUrl, so `&` is the only XML-special character they can contain.
-    private fun String.escape() = replace("&", "&amp;")
-
     // The app's FFmpeg seeks reliably with a fixed SegmentList `duration` (what the original manifest used).
     // Flip this to emit a per-segment SegmentTimeline for playlists with varying EXTINF durations.
     private const val USE_SEGMENT_TIMELINE = false
 
     private val MAP_URI_REGEX = Regex("""URI="([^"]+)"""")
     private val MAP_RANGE_REGEX = Regex("""BYTERANGE="([^"]+)"""")
+    private val RANGE_REGEX = Regex("""bytes=(\d*)-(\d*)""")
 }
