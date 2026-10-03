@@ -126,7 +126,17 @@ object OctopusDash : NanoHTTPD("127.0.0.1", 0) {
         val resource = if (index < 0) playlist.init else playlist.segments[index].resource
         var created: FutureTask<ByteArray>? = null
         val task = synchronized(cache) {
-            cache.getOrPut("$id/$track/$index") { FutureTask { stream.download(resource) }.also { created = it } }
+            val key = "$id/$track/$index"
+            val existing = cache[key]
+            val failed = existing != null && existing.isDone && runCatching { existing.get() }.isFailure
+            if (existing != null && !failed) {
+                existing
+            } else {
+                FutureTask { stream.download(resource) }.also {
+                    created = it
+                    cache[key] = it
+                }
+            }
         }
         created?.let { prefetcher.execute(it) }
         return task
